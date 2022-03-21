@@ -11,4 +11,7 @@ profile_default/
 ipython_config.py
 
 # data
-data/solar/*
+data/*
+
+# vscode
+.vscode/*
