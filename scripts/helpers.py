@@ -1,11 +1,23 @@
 import pandas as pd
 import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
 
-def read_data(generate_speed_angle=False):
-    df = pd.read_parquet("../data/processed/outlier_removed.parquet")
+
+def read_data(path="../data/processed/outlier_removed.parquet",
+              generate_speed_angle=False,
+              add_lagged=False):
+    df = pd.read_parquet(path)
+    if add_lagged:
+        df["production_48_lagged"] = df.groupby("rt_plant_id").production.shift(48)
     weather_cols = [col for col in df.columns if col.startswith(("UGRD", "VGRD"))]
 
-    df = df.set_index("forecast_dt")[["rt_plant_id", "production", *weather_cols]]
+    if add_lagged:
+        cols = ["rt_plant_id", "production", "production_48_lagged", *weather_cols]
+    else:
+        cols = ["rt_plant_id", "production", *weather_cols]
+
+    df = df.set_index("forecast_dt")[cols]
 
     if generate_speed_angle:
         for box in ["SW", "NW", "NE", "SE"]:
@@ -25,12 +37,20 @@ def expand_plant_dimension(df):
         df_np[:, i, :] = df[df.rt_plant_id == plant_id][cols].values
     return df_np
 
-def split_data(df, train_ratio=0.8, valid_ratio=0.1, scaler=None):    
+def split_data(df, train_ratio=0.8, valid_ratio=0.1, scaler=None):
+    PLANTS = sorted(df.rt_plant_id.unique())
     time_indices = sorted(df.index.unique())
-    
+
     train_indices = time_indices[:int(len(time_indices) * train_ratio)]
     valid_indices = time_indices[int(len(time_indices) * train_ratio):int(len(time_indices) * (train_ratio + valid_ratio))]
     test_indices = time_indices[int(len(time_indices) * (train_ratio + valid_ratio)):]
+
+    print("Train start and end dates: ", train_indices[0], train_indices[-1])
+    try:
+        print("Validation start and end dates: ", valid_indices[0], valid_indices[-1])
+    except:
+        pass
+    print("Test start and end dates: ", test_indices[0], test_indices[-1])
 
     train_df = df.loc[train_indices, :]
     valid_df = df.loc[valid_indices, :]
@@ -39,7 +59,7 @@ def split_data(df, train_ratio=0.8, valid_ratio=0.1, scaler=None):
     train_df_np = expand_plant_dimension(train_df)
     valid_df_np = expand_plant_dimension(valid_df)
     test_df_np = expand_plant_dimension(test_df)
-    
+
     if scaler is not None:
         import pickle
         assert scaler in ["minmax", "standart"]
@@ -58,9 +78,9 @@ def split_data(df, train_ratio=0.8, valid_ratio=0.1, scaler=None):
         train_df_np = np.array(train_df_np, dtype=np.float32)
         valid_df_np = np.array(valid_df_np, dtype=np.float32)
         test_df_np = np.array(test_df_np, dtype=np.float32)
-        
-        with open('scalers.pickle', 'wb') as handle:
-            pickle.dump(a, handle)
+
+        with open('../artifacts/scalers.pickle', 'wb') as handle:
+            pickle.dump(scalers, handle)
 
         # with open('scalers.pickle', 'rb') as handle:
         #     b = pickle.load(handle)
@@ -95,7 +115,7 @@ class WindowGenerator():
         self.input_width = input_width
         self.label_width = label_width
         self.shift = shift
-        
+
         self.input_shape = (self.input_width, self.number_of_plants, len(self.feature_column_indices))
 
         self.total_window_size = input_width + shift
@@ -137,14 +157,14 @@ class WindowGenerator():
 
             if label_col_index is None:
                 continue
-            
+
             if plant is not None:
                 input_values = inputs[n, :, plant, plot_col_index]
                 label_values = labels[n, :, plant, label_col_index]
             else:
                 input_values = tf.math.reduce_mean(inputs[n, :, :, plot_col_index], axis=1)
                 label_values = tf.math.reduce_mean(labels[n, :, :, label_col_index], axis=1)
-                
+
             plt.plot(self.input_indices, input_values, label='Inputs', marker='.', zorder=-10)
 
             plt.scatter(self.label_indices, label_values, edgecolors='k', label='Labels', c='#2ca02c', s=64)
@@ -154,7 +174,7 @@ class WindowGenerator():
                     prediction_values = predictions[n, :, plant, label_col_index]
                 else:
                     prediction_values = tf.math.reduce_mean(predictions[n, :, :, label_col_index], axis=1)
-                
+
                 prediction_values = tf.clip_by_value(prediction_values, clip_value_min=0, clip_value_max=1)
 
                 plt.scatter(self.label_indices, prediction_values, marker='X', edgecolors='k', label='Predictions',c='#ff7f0e', s=64)
@@ -196,7 +216,7 @@ class WindowGenerator():
             result = next(iter(self.train))
             self._example = result
         return result
-    
+
 
 
 def compile_and_fit(model, window, patience=10, max_epochs=50):
@@ -205,18 +225,18 @@ def compile_and_fit(model, window, patience=10, max_epochs=50):
         total = tf.reduce_sum(y_true)
         wmape = tf.realdiv(total_abs_diff, total)
         return wmape
-    
+
     early_stopping = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss',
         patience=patience,
-        mode='min', 
+        mode='min',
         verbose=1,
         restore_best_weights=True)
 
     model.compile(loss=tf.losses.MeanSquaredError(),
                   optimizer=tf.optimizers.Adam(),
-                  metrics=[tf.metrics.MeanAbsoluteError(), wmape]) 
-    
+                  metrics=[tf.metrics.MeanAbsoluteError(), wmape])
+
     history = model.fit(window.train, epochs=max_epochs,
                         validation_data=window.valid,
                         verbose=1,
