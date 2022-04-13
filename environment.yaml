@@ -13,13 +13,27 @@ dependencies:
 #   - networkx
 
   - pip:
-    - pandas==1.4.1
+    - pandas>=1.4.1
     - numpy==1.21
-    - pyarrow==7.0.0
-    - matplotlib==3.5.1
-    - lightgbm==3.3.2
-    - tensorflow==2.8.0
-    - ipykernel==6.7.0
-    - notebook==6.4.10
-    - geopandas==0.10.2
-    - shap==0.40
+    - pyarrow>=7.0.0
+    - matplotlib>=3.5.1
+    - # lightgbm==3.3.2
+    - tensorflow>=2.8.0
+    - ipykernel
+    - notebook
+    - # geopandas==0.10.2
+    - shap>=0.40
+
+
+# conda update -n base conda
+# conda create -n thesis python==3.9
+# pip install pip --upgrade
+# conda update -n thesis conda
+# conda install dgl -c dglteam
+# pip install tensorflow
+# pip install tqdm pandas matplotlib pyarrow shap ipykernel notebook
+# pip install shap optuna
+
+# conda create -n gluon python==3.9
+# pip install mxnet gluonts pandas matplotlib pyarrow sklearn
+# pip install ipykernel notebook jupyterlab
