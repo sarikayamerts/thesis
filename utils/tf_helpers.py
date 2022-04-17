@@ -5,8 +5,11 @@ import matplotlib.pyplot as plt
 
 import subprocess; FOLDER_PATH = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
 
-if tf.config.list_physical_devices('GPU'):
-    tf.keras.mixed_precision.set_global_policy("mixed_float16")
+gpu_devices = tf.config.list_physical_devices("GPU")
+
+if gpu_devices:
+    if tf.config.experimental.get_device_details(gpu_devices[0])["compute_capability"][0] > 6:
+        tf.keras.mixed_precision.set_global_policy("mixed_float16")
     # tf.keras.mixed_precision.set_global_policy("float32")
 tf.keras.utils.set_random_seed(235813)
 
