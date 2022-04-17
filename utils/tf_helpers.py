@@ -1,91 +1,14 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
+import subprocess; FOLDER_PATH = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
 
-def read_data(path="../data/processed/outlier_removed.parquet",
-              generate_speed_angle=False,
-              add_lagged=False):
-    df = pd.read_parquet(path)
-    if add_lagged:
-        df["production_48_lagged"] = df.groupby("rt_plant_id").production.shift(48)
-    weather_cols = [col for col in df.columns if col.startswith(("UGRD", "VGRD"))]
-
-    if add_lagged:
-        cols = ["rt_plant_id", "production", "production_48_lagged", *weather_cols]
-    else:
-        cols = ["rt_plant_id", "production", *weather_cols]
-
-    df = df.set_index("forecast_dt")[cols]
-
-    if generate_speed_angle:
-        for box in ["SW", "NW", "NE", "SE"]:
-            df[f"speed_{box}"] = np.sqrt(np.square(df[f"UGRD_80.m.above.ground.{box}"]) + np.square(df[f"VGRD_80.m.above.ground.{box}"]))
-            df[f"angle_{box}"] = np.arctan(df[f"UGRD_80.m.above.ground.{box}"] / df[f"VGRD_80.m.above.ground.{box}"])
-    return df
-
-def expand_plant_dimension(df):
-    PLANTS = sorted(df.rt_plant_id.unique())
-    n_loc = len(PLANTS)
-    n_time = df.index.nunique()
-    cols = [col for col in df.columns if col != "rt_plant_id"]
-    n_cols = len(cols)
-
-    df_np = np.zeros((n_time, n_loc, n_cols))
-    for i, plant_id in enumerate(PLANTS):
-        df_np[:, i, :] = df[df.rt_plant_id == plant_id][cols].values
-    return df_np
-
-def split_data(df, train_ratio=0.8, valid_ratio=0.1, scaler=None):
-    PLANTS = sorted(df.rt_plant_id.unique())
-    time_indices = sorted(df.index.unique())
-
-    train_indices = time_indices[:int(len(time_indices) * train_ratio)]
-    valid_indices = time_indices[int(len(time_indices) * train_ratio):int(len(time_indices) * (train_ratio + valid_ratio))]
-    test_indices = time_indices[int(len(time_indices) * (train_ratio + valid_ratio)):]
-
-    print("Train start and end dates: ", train_indices[0], train_indices[-1])
-    try:
-        print("Validation start and end dates: ", valid_indices[0], valid_indices[-1])
-    except:
-        pass
-    print("Test start and end dates: ", test_indices[0], test_indices[-1])
-
-    train_df = df.loc[train_indices, :]
-    valid_df = df.loc[valid_indices, :]
-    test_df = df.loc[test_indices, :]
-
-    train_df_np = expand_plant_dimension(train_df)
-    valid_df_np = expand_plant_dimension(valid_df)
-    test_df_np = expand_plant_dimension(test_df)
-
-    if scaler is not None:
-        import pickle
-        assert scaler in ["minmax", "standart"]
-        if scaler == "minmax":
-            from sklearn.preprocessing import MinMaxScaler as scaler_
-        else:
-            from sklearn.preprocessing import StandartScaler as scaler_
-        scalers = {}
-        for i, plant in enumerate(PLANTS):
-            scalers[plant] = scaler_()
-            # train_df = pd.DataFrame(scaler.fit_transform(train_df), index=train_df.index, columns=train_df.columns)
-            train_df_np[:, i, :] = scalers[plant].fit_transform(train_df_np[:, i, :])
-            valid_df_np[:, i, :] = scalers[plant].transform(valid_df_np[:, i, :])
-            test_df_np[:, i, :] = scalers[plant].transform(test_df_np[:, i, :])
-
-        train_df_np = np.array(train_df_np, dtype=np.float32)
-        valid_df_np = np.array(valid_df_np, dtype=np.float32)
-        test_df_np = np.array(test_df_np, dtype=np.float32)
-
-        with open('../artifacts/scalers.pickle', 'wb') as handle:
-            pickle.dump(scalers, handle)
-
-        # with open('scalers.pickle', 'rb') as handle:
-        #     b = pickle.load(handle)
-
-    return train_df_np, valid_df_np, test_df_np
+if tf.config.list_physical_devices('GPU'):
+    tf.keras.mixed_precision.set_global_policy("mixed_float16")
+    # tf.keras.mixed_precision.set_global_policy("float32")
+tf.keras.utils.set_random_seed(235813)
 
 
 class WindowGenerator():
@@ -97,6 +20,7 @@ class WindowGenerator():
         self.test_df = test_df
         self.ndim = self.train_df.ndim
         assert self.ndim in [2, 3]
+
         if columns is None:
             columns = train_df.columns
 
@@ -170,6 +94,8 @@ class WindowGenerator():
             plt.scatter(self.label_indices, label_values, edgecolors='k', label='Labels', c='#2ca02c', s=64)
             if model is not None:
                 predictions = model(inputs)
+                if predictions.ndim == 3:
+                    predictions = tf.expand_dims(predictions, axis=2)
                 if plant is not None:
                     prediction_values = predictions[n, :, plant, label_col_index]
                 else:
@@ -184,14 +110,18 @@ class WindowGenerator():
 
         plt.xlabel('Time [h]')
 
-    def make_dataset(self, data):
+    def make_dataset(self, data, test=False):
         data = np.array(data, dtype=np.float32)
+        if test:
+            sequence_stride, shuffle = 24, False
+        else:
+            sequence_stride, shuffle = 1, True
         ds = tf.keras.utils.timeseries_dataset_from_array(
             data=data,
             targets=None,
             sequence_length=self.total_window_size,
-            # sequence_stride=24, shuffle=False,
-            sequence_stride=1, shuffle=True,
+            sequence_stride=sequence_stride,
+            shuffle=shuffle,
             batch_size=64,)
         ds = ds.map(self.split_window)
         return ds
@@ -202,11 +132,11 @@ class WindowGenerator():
 
     @property
     def valid(self):
-        return self.make_dataset(self.valid_df)
+        return self.make_dataset(self.valid_df, test=True)
 
     @property
     def test(self):
-        return self.make_dataset(self.test_df)
+        return self.make_dataset(self.test_df, test=True)
 
     @property
     def example(self):
@@ -218,8 +148,18 @@ class WindowGenerator():
         return result
 
 
+class ResidualWrapper(tf.keras.Model):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
 
-def compile_and_fit(model, window, patience=10, max_epochs=50):
+    def call(self, inputs, *args, **kwargs):
+        delta = self.model(inputs, *args, **kwargs)
+        return inputs[:, -1:, :, 0] + delta
+
+
+def compile_and_fit(model, window, patience=10, max_epochs=50,
+                    loss="mse", optimizer="adam", verbose=1):
     def wmape(y_true, y_pred):
         total_abs_diff = tf.reduce_sum(tf.abs(tf.subtract(y_true, y_pred)))
         total = tf.reduce_sum(y_true)
@@ -230,15 +170,63 @@ def compile_and_fit(model, window, patience=10, max_epochs=50):
         monitor='val_loss',
         patience=patience,
         mode='min',
-        verbose=1,
+        verbose=verbose,
         restore_best_weights=True)
 
-    model.compile(loss=tf.losses.MeanSquaredError(),
-                  optimizer=tf.optimizers.Adam(),
-                  metrics=[tf.metrics.MeanAbsoluteError(), wmape])
+    # tqdm_callback = tf.keras.callbacks.TQDMProgressCallback(leave_inner=True, leave_outer=False)
+    tqdm_callback = tf.keras.callbacks.ProgbarLogger(count_mode="samples", stateful_metrics=None)
+    model_checkpoint = tf.keras.callbacks.ModelCheckpoint(
+        filepath=f'{FOLDER_PATH}/artifacts/checkpoint',
+        save_weights_only=True,
+        monitor='val_wmape',
+        mode='min',
+        verbose=verbose,
+        save_best_only=True)
+
+    # metrics = ["mse", wmape]
+    model.compile(loss=loss, optimizer=optimizer, metrics=[wmape])
 
     history = model.fit(window.train, epochs=max_epochs,
                         validation_data=window.valid,
-                        verbose=1,
-                        callbacks=[early_stopping])
-    return history
+                        verbose=verbose,
+                        callbacks=[early_stopping, model_checkpoint, tqdm_callback])
+    model.load_weights(f'{FOLDER_PATH}/artifacts/checkpoint')
+    return model, history
+
+
+def _calculate_wmape(pred, actual):
+    return np.sum(np.abs(actual - pred)) / np.sum(actual)
+
+def calculate_plantwise_wmape(model, window, selected_plants):
+    predictions = model.predict(window.test)
+    actuals = np.concatenate([y for _, y in window.test], axis=0)
+    predictions_val = model.predict(window.valid)
+    actuals_val = np.concatenate([y for _, y in window.valid], axis=0)
+    wmape_dict, wmape_dict_val = {}, {}
+    for i, j in enumerate(selected_plants):
+        pred_ = predictions[:, :, i, 0].reshape(-1)
+        actual_ = actuals[:, :, i, 0].reshape(-1)
+        wmape_dict[j] = _calculate_wmape(pred_, actual_)
+        pred_val_ = predictions_val[:, :, i, 0].reshape(-1)
+        actual_val_ = actuals_val[:, :, i, 0].reshape(-1)
+        wmape_dict_val[j] = _calculate_wmape(pred_val_, actual_val_)
+    wmape_df = pd.DataFrame(wmape_dict.items())
+    wmape_val_df = pd.DataFrame(wmape_dict_val.items())
+    wmape_df.columns = ["rt_plant_id", "wmape"]
+    wmape_val_df.columns = ["rt_plant_id", "wmape_val"]
+    wmape_df = pd.merge(wmape_df, wmape_val_df, on="rt_plant_id")
+    return wmape_df.sort_values("wmape")
+
+def plot_plantwise_predictions(model, dataset, plant_id=None):
+    predictions = model.predict(dataset)
+    actuals = np.concatenate([y for _, y in dataset], axis=0)
+    if plant_id is not None:
+        actual_values = actuals[:, :, plant_id, :].flatten()
+        predicted_values = predictions[:, :, plant_id, :].flatten()
+    else:
+        actual_values = np.mean(actuals, axis=2).flatten()
+        predicted_values = np.mean(predictions, axis=2).flatten()
+    plt.plot(actual_values[:500], label='Actual')
+    plt.plot(predicted_values[:500], label='Predicted')
+    plt.legend()
+

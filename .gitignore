@@ -12,6 +12,7 @@ ipython_config.py
 
 # data
 data/*
+artifacts/*
 
 # vscode
 .vscode/*
