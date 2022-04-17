@@ -1,8 +1,12 @@
 import pandas as pd
 import numpy as np
+import os
 
-import subprocess; FOLDER_PATH = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
-
+if not os.environ.get("FOLDER_PATH"):
+    import subprocess; FOLDER_PATH = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
+else:
+    FOLDER_PATH = os.environ["FOLDER_PATH"]
+    
 def read_data(generate_speed_angle=False,
               add_lagged=False,
               number_of_plants=94):
