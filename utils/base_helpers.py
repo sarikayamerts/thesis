@@ -6,7 +6,7 @@ if not os.environ.get("FOLDER_PATH"):
     import subprocess; FOLDER_PATH = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
 else:
     FOLDER_PATH = os.environ["FOLDER_PATH"]
-    
+
 def read_data(generate_speed_angle=False,
               add_lagged=False,
               number_of_plants=94):
@@ -50,55 +50,65 @@ def _expand_plant_dimension(df):
         df_np[:, i, :] = df[df.rt_plant_id == plant_id][cols].values
     return df_np
 
-def split_data(df, train_ratio=0.8, valid_ratio=0.1, scaler=None):
-    PLANTS = sorted(df.rt_plant_id.unique())
+def scale_data(train_df, valid_df, test_df, scaler=None, expand=False):
+    PLANTS = sorted(train_df.rt_plant_id.unique())
+
+    if scaler is not None:
+        import pickle
+        assert scaler in ["minmax", "standart"]
+
+        scalers = {}
+        lower_bound = 1e-8
+
+        if scaler == "minmax":
+            from sklearn.preprocessing import MinMaxScaler as scaler_
+        else:
+            from sklearn.preprocessing import StandartScaler as scaler_
+
+    if expand:
+        train_df = _expand_plant_dimension(train_df)
+        valid_df = _expand_plant_dimension(valid_df)
+        test_df = _expand_plant_dimension(test_df)
+        for i, plant in enumerate(PLANTS):
+            scalers[plant] = scaler_()
+            train_df[:, i, :] = scalers[plant].fit_transform(train_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
+            valid_df[:, i, :] = scalers[plant].transform(valid_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
+            test_df[:, i, :] = scalers[plant].transform(test_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
+    else:
+        for i, plant in enumerate(PLANTS):
+            scalers[plant] = scaler_()
+            train_df.loc[train_df["rt_plant_id"] == plant, train_df.columns != "rt_plant_id"] = scalers[plant].fit_transform(
+                train_df.loc[train_df["rt_plant_id"] == plant, train_df.columns != "rt_plant_id"]).clip(min=lower_bound, max=1-lower_bound)
+            valid_df.loc[valid_df["rt_plant_id"] == plant, valid_df.columns != "rt_plant_id"] = scalers[plant].transform(
+                valid_df.loc[valid_df["rt_plant_id"] == plant, valid_df.columns != "rt_plant_id"]).clip(min=lower_bound, max=1-lower_bound)
+            test_df.loc[test_df["rt_plant_id"] == plant, test_df.columns != "rt_plant_id"] = scalers[plant].transform(
+                test_df.loc[test_df["rt_plant_id"] == plant, test_df.columns != "rt_plant_id"]).clip(min=lower_bound, max=1-lower_bound)
+
+    if scaler is not None:
+        with open(f'{FOLDER_PATH}/artifacts/scalers.pickle', 'wb') as handle:
+            pickle.dump(scalers, handle)
+
+    return train_df, valid_df, test_df
+
+def split_data(df, train_ratio=0.8, valid_ratio=0.1):
     time_indices = sorted(df.index.unique())
 
     train_indices = time_indices[:int(len(time_indices) * train_ratio)]
     valid_indices = time_indices[int(len(time_indices) * train_ratio):int(len(time_indices) * (train_ratio + valid_ratio))]
     test_indices = time_indices[int(len(time_indices) * (train_ratio + valid_ratio)):]
 
-    print("Train start and end dates: ", train_indices[0], train_indices[-1])
+    print("Train start and end dates:\t", train_indices[0], "\t", train_indices[-1])
     try:
-        print("Validation start and end dates: ", valid_indices[0], valid_indices[-1])
+        print("Validation start and end dates:\t", valid_indices[0], "\t", valid_indices[-1])
     except:
         pass
-    print("Test start and end dates: ", test_indices[0], test_indices[-1])
+    print("Test start and end dates:\t", test_indices[0], "\t", test_indices[-1])
 
     train_df = df.loc[train_indices, :]
     valid_df = df.loc[valid_indices, :]
     test_df = df.loc[test_indices, :]
 
-    train_df_np = _expand_plant_dimension(train_df)
-    valid_df_np = _expand_plant_dimension(valid_df)
-    test_df_np = _expand_plant_dimension(test_df)
-
-    if scaler is not None:
-        import pickle
-        assert scaler in ["minmax", "standart"]
-        if scaler == "minmax":
-            from sklearn.preprocessing import MinMaxScaler as scaler_
-        else:
-            from sklearn.preprocessing import StandartScaler as scaler_
-        scalers = {}
-        for i, plant in enumerate(PLANTS):
-            scalers[plant] = scaler_()
-            # train_df = pd.DataFrame(scaler.fit_transform(train_df), index=train_df.index, columns=train_df.columns)
-            train_df_np[:, i, :] = scalers[plant].fit_transform(train_df_np[:, i, :])
-            valid_df_np[:, i, :] = scalers[plant].transform(valid_df_np[:, i, :])
-            test_df_np[:, i, :] = scalers[plant].transform(test_df_np[:, i, :])
-
-        train_df_np = np.array(train_df_np, dtype=np.float32)
-        valid_df_np = np.array(valid_df_np, dtype=np.float32)
-        test_df_np = np.array(test_df_np, dtype=np.float32)
-
-        with open(f'{FOLDER_PATH}/artifacts/scalers.pickle', 'wb') as handle:
-            pickle.dump(scalers, handle)
-
-        # with open('scalers.pickle', 'rb') as handle:
-        #     b = pickle.load(handle)
-
-    return train_df_np, valid_df_np, test_df_np
+    return train_df, valid_df, test_df
 
 def plot_metrics(performance, val_performance, metric_index=-1):
     import matplotlib.pyplot as plt
@@ -113,3 +123,5 @@ def plot_metrics(performance, val_performance, metric_index=-1):
     plt.xticks(ticks=x, labels=performance.keys(), rotation=45)
     _ = plt.legend(loc="upper right")
 
+def calculate_wmape(preds, actuals):
+    return np.sum(np.abs(preds-actuals)) / np.sum(np.abs(actuals))

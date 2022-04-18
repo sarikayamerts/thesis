@@ -176,26 +176,89 @@ def compile_and_fit(model, window, patience=10, max_epochs=50,
         verbose=verbose,
         restore_best_weights=True)
 
-    # tqdm_callback = tf.keras.callbacks.TQDMProgressCallback(leave_inner=True, leave_outer=False)
-    tqdm_callback = tf.keras.callbacks.ProgbarLogger(count_mode="samples", stateful_metrics=None)
     model_checkpoint = tf.keras.callbacks.ModelCheckpoint(
         filepath=f'{FOLDER_PATH}/artifacts/checkpoint',
-        save_weights_only=True,
-        monitor='val_wmape',
+        save_weights_only=True, monitor='val_wmape',
         mode='min',
         verbose=verbose,
         save_best_only=True)
 
     # metrics = ["mse", wmape]
-    model.compile(loss=loss, optimizer=optimizer, metrics=[wmape])
+    model.compile(loss=loss, optimizer=optimizer, metrics=[wmape],
+                  steps_per_execution=32, jit_compile=True)
 
     history = model.fit(window.train, epochs=max_epochs,
                         validation_data=window.valid,
                         verbose=verbose,
-                        callbacks=[early_stopping, model_checkpoint, tqdm_callback])
+                        callbacks=[early_stopping, model_checkpoint])
     model.load_weights(f'{FOLDER_PATH}/artifacts/checkpoint')
     return model, history
 
+def correlation_ordering(df, initial_start=7):
+    corr = pd.pivot_table(
+        df[["rt_plant_id", "production"]].reset_index(),
+        index="forecast_dt", columns="rt_plant_id",
+        values="production").corr()
+    selected_plant_ids, selected_plants = [], []
+    to_append = initial_start
+    selected_plant_ids.append(PLANTS[to_append])
+    selected_plants.append(to_append)
+
+    for _ in range(93):
+        corr_series = corr.iloc[to_append].drop(labels=selected_plant_ids)
+        to_append = PLANTS.index(corr_series.idxmax())
+        selected_plant_ids.append(PLANTS[to_append])
+        selected_plants.append(to_append)
+    return selected_plants
+
+# corr_mean = 0.
+# out = []
+
+# for i in range(94):
+#     corr_list = []
+#     selected_plants = []
+#     selected_plant_ids = []
+#     to_append = i
+#     selected_plant_ids.append(PLANTS[to_append])
+#     selected_plants.append(to_append)
+
+#     for _ in range(93):
+#         corr_series = corr.iloc[to_append].drop(labels=selected_plant_ids)
+#         to_append = PLANTS.index(corr_series.idxmax())
+#         selected_plant_ids.append(PLANTS[to_append])
+#         selected_plants.append(to_append)
+#         corr_list.append(np.max(corr_series))
+
+#     corr_mean = np.mean(corr_list)
+#     out.append([
+#         i, corr_mean, np.min(corr_list), np.sum([i > 0.9 for i in corr_list]),
+#         np.sum([i > 0.8 for i in corr_list]), np.sum([i > 0.7 for i in corr_list]),
+#         np.sum([i > 0.6 for i in corr_list]), np.sum([i > 0.5 for i in corr_list])])
+
+# out = pd.DataFrame(out)
+# out.columns = ["plant", "mean", "min", "above_9", "above_8", "above_7", "above_6", "above_5"]
+# out.sort_values("min", ascending=False).head(20)
+
+# selected_plants = correlation_ordering(df)
+
+# def expand_plant_dimension(df, selected_plants=None):
+#     n_loc = len(PLANTS)
+#     n_time = df.index.nunique()
+#     cols = [col for col in df.columns if col != "rt_plant_id"]
+#     n_cols = len(cols)
+
+#     df_np = np.zeros((n_time, n_loc, n_cols))
+#     if selected_plants is not None:
+#         for i, j in enumerate(selected_plants):
+#             df_np[:, i, :] = df[df.rt_plant_id == PLANTS[j]][cols].values
+#     else:
+#         for i, plant_id in enumerate(PLANTS):
+#             df_np[:, i, :] = df[df.rt_plant_id == plant_id][cols].values
+#     return df_np
+
+# train_df_np = expand_plant_dimension(train_df, selected_plants)
+# valid_df_np = expand_plant_dimension(valid_df, selected_plants)
+# test_df_np = expand_plant_dimension(test_df, selected_plants)
 
 def _calculate_wmape(pred, actual):
     return np.sum(np.abs(actual - pred)) / np.sum(actual)
