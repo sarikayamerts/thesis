@@ -12,7 +12,7 @@ from .base_helpers import calculate_wmape
 mx.random.seed(7)
 np.random.seed(7)
 
-CTX = "gpu" if mx.context.num_gpus() else "cpu"
+CTX = "gpu" if mx.context.num_gpus() else "cpu" # add this to trainer
 FREQ = "1H"
 PREDICTION_LENGTH = int(os.environ.get("PREDICTION_LENGTH", 48))
 CONTEXT_LENGTH = int(os.environ.get("CONTEXT_LENGTH", 72))
