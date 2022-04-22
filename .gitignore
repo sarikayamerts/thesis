@@ -13,6 +13,8 @@ ipython_config.py
 # data
 data/*
 artifacts/*
+notebooks/multi_plant/wandb/*
 
 # vscode
 .vscode/*
+

@@ -270,10 +270,14 @@ def calculate_plantwise_wmape(model, window, selected_plants):
     actuals_val = np.concatenate([y for _, y in window.valid], axis=0)
     wmape_dict, wmape_dict_val = {}, {}
     for i, j in enumerate(selected_plants):
-        pred_ = predictions[:, :, i, 0].reshape(-1)
+        try:
+            pred_ = predictions[:, :, i, 0].reshape(-1)
+            pred_val_ = predictions_val[:, :, i, 0].reshape(-1)
+        except:
+            pred_ = predictions[:, :, i].reshape(-1)
+            pred_val_ = predictions_val[:, :, i].reshape(-1)
         actual_ = actuals[:, :, i, 0].reshape(-1)
         wmape_dict[j] = _calculate_wmape(pred_, actual_)
-        pred_val_ = predictions_val[:, :, i, 0].reshape(-1)
         actual_val_ = actuals_val[:, :, i, 0].reshape(-1)
         wmape_dict_val[j] = _calculate_wmape(pred_val_, actual_val_)
     wmape_df = pd.DataFrame(wmape_dict.items())

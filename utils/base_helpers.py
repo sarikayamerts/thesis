@@ -1,3 +1,4 @@
+from cgi import test
 import pandas as pd
 import numpy as np
 import os
@@ -20,10 +21,8 @@ def read_data(generate_speed_angle=False,
     weather_cols = [col for col in df.columns if col.startswith(("UGRD", "VGRD"))]
 
     assert 1 <= number_of_plants <= 94
-    if number_of_plants < 94:
-        plants = df.groupby("rt_plant_id").production.sum().sort_values(ascending=False).index[:number_of_plants]
-        print("Selected plants:\n", plants.to_list())
-        df = df[df["rt_plant_id"].isin(plants)]
+    plants = sorted(df.groupby("rt_plant_id").production.sum().sort_values(ascending=False).index[:number_of_plants].to_list())
+    df = df[df["rt_plant_id"].isin(plants)]
 
     if add_lagged:
         cols = ["rt_plant_id", "production", "production_48_lagged", *weather_cols]
@@ -36,7 +35,7 @@ def read_data(generate_speed_angle=False,
         for box in ["SW", "NW", "NE", "SE"]:
             df[f"speed_{box}"] = np.sqrt(np.square(df[f"UGRD_80.m.above.ground.{box}"]) + np.square(df[f"VGRD_80.m.above.ground.{box}"]))
             df[f"angle_{box}"] = np.arctan(df[f"UGRD_80.m.above.ground.{box}"] / df[f"VGRD_80.m.above.ground.{box}"])
-    return df
+    return df, plants
 
 def _expand_plant_dimension(df):
     PLANTS = sorted(df.rt_plant_id.unique())
@@ -50,45 +49,43 @@ def _expand_plant_dimension(df):
         df_np[:, i, :] = df[df.rt_plant_id == plant_id][cols].values
     return df_np
 
-def scale_data(train_df, valid_df, test_df, scaler=None, expand=False):
-    PLANTS = sorted(train_df.rt_plant_id.unique())
+def scale_data(train_df, valid_df, test_df, plants, scaler="minmax"):
+    import pickle
+    assert scaler in ["minmax", "standart"]
 
-    if scaler is not None:
-        import pickle
-        assert scaler in ["minmax", "standart"]
+    scalers = {}
+    lower_bound = 1e-8
 
-        scalers = {}
-        lower_bound = 1e-8
-
-        if scaler == "minmax":
-            from sklearn.preprocessing import MinMaxScaler as scaler_
-        else:
-            from sklearn.preprocessing import StandartScaler as scaler_
-
-    if expand:
-        train_df = _expand_plant_dimension(train_df)
-        valid_df = _expand_plant_dimension(valid_df)
-        test_df = _expand_plant_dimension(test_df)
-        for i, plant in enumerate(PLANTS):
-            scalers[plant] = scaler_()
-            train_df[:, i, :] = scalers[plant].fit_transform(train_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
-            valid_df[:, i, :] = scalers[plant].transform(valid_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
-            test_df[:, i, :] = scalers[plant].transform(test_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
+    if scaler == "minmax":
+        from sklearn.preprocessing import MinMaxScaler as scaler_
     else:
-        for i, plant in enumerate(PLANTS):
-            scalers[plant] = scaler_()
+        from sklearn.preprocessing import StandartScaler as scaler_
+
+    for i, plant in enumerate(plants):
+        scalers[plant] = scaler_()
+        if isinstance(train_df, pd.DataFrame):
             train_df.loc[train_df["rt_plant_id"] == plant, train_df.columns != "rt_plant_id"] = scalers[plant].fit_transform(
                 train_df.loc[train_df["rt_plant_id"] == plant, train_df.columns != "rt_plant_id"]).clip(min=lower_bound, max=1-lower_bound)
             valid_df.loc[valid_df["rt_plant_id"] == plant, valid_df.columns != "rt_plant_id"] = scalers[plant].transform(
                 valid_df.loc[valid_df["rt_plant_id"] == plant, valid_df.columns != "rt_plant_id"]).clip(min=lower_bound, max=1-lower_bound)
             test_df.loc[test_df["rt_plant_id"] == plant, test_df.columns != "rt_plant_id"] = scalers[plant].transform(
                 test_df.loc[test_df["rt_plant_id"] == plant, test_df.columns != "rt_plant_id"]).clip(min=lower_bound, max=1-lower_bound)
+        else:
+            train_df[:, i, :] = scalers[plant].fit_transform(train_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
+            valid_df[:, i, :] = scalers[plant].transform(valid_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
+            test_df[:, i, :] = scalers[plant].transform(test_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
 
-    if scaler is not None:
-        with open(f'{FOLDER_PATH}/artifacts/scalers.pickle', 'wb') as handle:
-            pickle.dump(scalers, handle)
+    with open(f'{FOLDER_PATH}/artifacts/scalers.pickle', 'wb') as handle:
+        pickle.dump(scalers, handle)
 
     return train_df, valid_df, test_df
+
+def expand_data(train_df, valid_df, test_df):
+    train_df = _expand_plant_dimension(train_df)
+    valid_df = _expand_plant_dimension(valid_df)
+    test_df = _expand_plant_dimension(test_df)
+    return train_df, valid_df, test_df
+
 
 def split_data(df, train_ratio=0.8, valid_ratio=0.1):
     time_indices = sorted(df.index.unique())
