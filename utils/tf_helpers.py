@@ -5,10 +5,10 @@ import matplotlib.pyplot as plt
 
 import subprocess; FOLDER_PATH = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
 
-gpu_devices = tf.config.list_physical_devices("GPU")
+gpu = tf.config.list_physical_devices("GPU")
 
-if gpu_devices:
-    if tf.config.experimental.get_device_details(gpu_devices[0])["compute_capability"][0] > 6:
+if gpu:
+    if tf.config.experimental.get_device_details(gpu[0])["compute_capability"][0] > 6:
         tf.keras.mixed_precision.set_global_policy("mixed_float16")
     # tf.keras.mixed_precision.set_global_policy("float32")
 tf.keras.utils.set_random_seed(235813)
@@ -184,9 +184,11 @@ def compile_and_fit(model, window, patience=10, max_epochs=50,
         save_best_only=True)
 
     # metrics = ["mse", wmape]
-    model.compile(loss=loss, optimizer=optimizer, metrics=[wmape],
-                  steps_per_execution=32, jit_compile=True)
-
+    if gpu:
+        model.compile(loss=loss, optimizer=optimizer, metrics=[wmape],
+                    steps_per_execution=32, jit_compile=True)
+    else:
+        model.compile(loss=loss, optimizer=optimizer, metrics=[wmape])
     history = model.fit(window.train, epochs=max_epochs,
                         validation_data=window.valid,
                         verbose=verbose,
