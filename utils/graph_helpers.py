@@ -15,16 +15,21 @@ def generate_adj_matrix(df, threshold):
     return adjacency_matrix
 
 class GraphInfo:
-    def __init__(self, edges, num_nodes):
+    def __init__(self, edges, num_nodes, edge_weights):
         self.edges = edges
         self.num_nodes = num_nodes
+        self.edge_weights = edge_weights
 
-def create_graph(adjacency_matrix):
+def create_graph(adjacency_matrix, weight=True):
     node_indices, neighbor_indices = np.where(adjacency_matrix.values > 0)
-    graph = GraphInfo((node_indices.tolist(), neighbor_indices.tolist()), adjacency_matrix.shape[0])
+    edges = (node_indices.tolist(), neighbor_indices.tolist())
+    if weight:
+        edge_weights = adjacency_matrix.values[adjacency_matrix.values > 0]
+    else:
+        edge_weights = np.ones(len(edges[1]))
+    graph = GraphInfo(edges, adjacency_matrix.shape[0], edge_weights=edge_weights)
     print(f"number of nodes: {graph.num_nodes}, number of edges: {len(graph.edges[0])}")
     return graph
-
 
 
 
@@ -70,11 +75,21 @@ class GraphConv(layers.Layer):
         raise ValueError(f"Invalid aggregation type: {self.aggregation_type}")
 
     def compute_nodes_representation(self, features: tf.Tensor):
+        # print("Computing nodes representation")
+        # print(features.shape)
+        # print(self.weight.shape)
         return tf.matmul(features, self.weight)
 
     def compute_aggregated_messages(self, features: tf.Tensor):
         neighbour_representations = tf.gather(features, self.graph_info.edges[1])
+        # print(neighbour_representations.shape)
+        neighbour_representations = tf.transpose(neighbour_representations, [3, 1, 2, 0])
+        neighbour_representations *= tf.convert_to_tensor(np.array(self.graph_info.edge_weights)    .astype("float32"))
+        neighbour_representations = tf.transpose(neighbour_representations, [3, 1, 2, 0])
         aggregated_messages = self.aggregate(neighbour_representations)
+        # print("Computing aggregated messages")
+        # print(aggregated_messages.shape)
+        # print(self.weight.shape)
         return tf.matmul(aggregated_messages, self.weight)
 
     def update(self, nodes_representation: tf.Tensor, aggregated_messages: tf.Tensor):
@@ -160,5 +175,5 @@ class LSTMGC(layers.Layer):
         lstm_out = self.lstm(gcn_out)  # lstm_out has shape: (num_nodes * batch_size, lstm_units)
 
         dense_output = self.dense(lstm_out)  # dense_output has shape: (num_nodes * batch_size, output_seq_len)
-        output = tf.reshape(dense_output, (num_nodes, batch_size, self.output_seq_len))
-        return tf.transpose(output, [1, 2, 0])  # returns Tensor of shape (batch_size, output_seq_len, num_nodes)
+        output = tf.reshape(dense_output, (num_nodes, batch_size, self.output_seq_len, -1))
+        return tf.transpose(output, [1, 2, 0, 3])  # returns Tensor of shape (batch_size, output_seq_len, num_nodes)
