@@ -31,12 +31,10 @@ class WindowGenerator():
         self.label_columns_indices = {name: i for i, name in enumerate(label_columns)}
         self.column_indices = {name: i for i, name in enumerate(columns)}
         self.feature_column_indices = [v for k,v in self.column_indices.items() if k not in self.label_columns]
-        # self.feature_number = len(self.feature_column_indices)
         if self.train_df.ndim == 2:
             self.number_of_plants = 1
         else:
             self.number_of_plants = self.train_df.shape[1]
-        # list(self.label_columns_indices.values())
 
         # Work out the window parameters.
         self.input_width = input_width
@@ -44,14 +42,19 @@ class WindowGenerator():
         self.shift = shift
 
         self.input_shape = (self.input_width, self.number_of_plants, len(self.feature_column_indices))
-
-        self.total_window_size = input_width + shift
-
+        if shift >= 0:
+            self.total_window_size = input_width + shift
+        else:
+            self.total_window_size = input_width
         self.input_slice = slice(0, input_width)
         self.input_indices = np.arange(self.total_window_size)[self.input_slice]
 
-        self.label_start = self.total_window_size - self.label_width
-        self.labels_slice = slice(self.label_start, None)
+        if shift >= 0:
+            self.label_start = self.total_window_size - self.label_width
+            self.labels_slice = slice(self.label_start, None)
+        else:
+            self.label_start = self.total_window_size - self.label_width + shift
+            self.labels_slice = slice(self.label_start, self.label_start+self.label_width)
         self.label_indices = np.arange(self.total_window_size)[self.labels_slice]
 
     def __repr__(self):
@@ -196,20 +199,20 @@ def compile_and_fit(model, window, patience=10, max_epochs=50,
     model.load_weights(f'{FOLDER_PATH}/artifacts/checkpoint')
     return model, history
 
-def correlation_ordering(df, initial_start=7):
+def correlation_ordering(df, plants, initial_start=7):
     corr = pd.pivot_table(
         df[["rt_plant_id", "production"]].reset_index(),
         index="forecast_dt", columns="rt_plant_id",
         values="production").corr()
     selected_plant_ids, selected_plants = [], []
     to_append = initial_start
-    selected_plant_ids.append(PLANTS[to_append])
+    selected_plant_ids.append(plants[to_append])
     selected_plants.append(to_append)
 
-    for _ in range(93):
+    for _ in range(len(plants)-1):
         corr_series = corr.iloc[to_append].drop(labels=selected_plant_ids)
-        to_append = PLANTS.index(corr_series.idxmax())
-        selected_plant_ids.append(PLANTS[to_append])
+        to_append = plants.index(corr_series.idxmax())
+        selected_plant_ids.append(plants[to_append])
         selected_plants.append(to_append)
     return selected_plants
 
