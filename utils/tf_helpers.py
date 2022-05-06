@@ -1,9 +1,20 @@
+from abc import abstractmethod
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
 
-import subprocess; FOLDER_PATH = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
+import wandb
+import os
+
+if not os.environ.get("FOLDER_PATH"):
+    import subprocess; FOLDER_PATH = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
+else:
+    FOLDER_PATH = os.environ["FOLDER_PATH"]
 
 gpu = tf.config.list_physical_devices("GPU")
 
@@ -15,20 +26,17 @@ tf.keras.utils.set_random_seed(235813)
 
 
 class WindowGenerator():
-    def __init__(self, input_width, label_width, shift,
-                 train_df, valid_df, test_df,
-                 columns=None, label_columns=None):
-        self.train_df = train_df
-        self.valid_df = valid_df
-        self.test_df = test_df
+    def __init__(self, input_width, label_width, shift, data):
+        self.train_df = data.train_df
+        self.valid_df = data.valid_df
+        self.test_df = data.test_df
         self.ndim = self.train_df.ndim
         assert self.ndim in [2, 3]
+        columns = [col for col in data.df.columns if col != "rt_plant_id"]
+        self.data = data
 
-        if columns is None:
-            columns = train_df.columns
-
-        self.label_columns = label_columns
-        self.label_columns_indices = {name: i for i, name in enumerate(label_columns)}
+        self.label_columns = ["production"]
+        self.label_columns_indices = {name: i for i, name in enumerate(self.label_columns)}
         self.column_indices = {name: i for i, name in enumerate(columns)}
         self.feature_column_indices = [v for k,v in self.column_indices.items() if k not in self.label_columns]
         if self.train_df.ndim == 2:
@@ -153,120 +161,176 @@ class WindowGenerator():
             self._example = result
         return result
 
+class BaseTFModel:
+    def __init__(self, window):
+        self.window = window
+        self.OUT_STEPS = 24
+        self.history = None
+        self.fitted_model = None
 
-class ResidualWrapper(tf.keras.Model):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
+    @property
+    def model(self):
+        model = tf.keras.models.Sequential()
+        model.add(tf.keras.layers.InputLayer(input_shape=(self.window.input_shape)))
+        model.add(tf.keras.layers.Permute((1,2,3), name="start------"))
 
-    def call(self, inputs, *args, **kwargs):
-        delta = self.model(inputs, *args, **kwargs)
-        return inputs[:, -1:, :, 0] + delta
+        model = self.add_model(model)
+
+        model.add(tf.keras.layers.Reshape([self.window.number_of_plants, -1], name="end--------"))
+        model.add(tf.keras.layers.Dense(self.OUT_STEPS))
+        model.add(tf.keras.layers.Permute((2,1)))
+        model.add(tf.keras.layers.Reshape([self.OUT_STEPS, self.window.number_of_plants, 1]))
+        return model
+
+    @abstractmethod
+    def add_model(self, model):
+        return model
+
+    def __repr__(self):
+        return self.__class__.__name__
+
+    def start_wandb(self, project="keras", name=None, config=None):
+        name = name or self.__class__.__name__ + "_" + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        wandb.init(project=project, name=name, config=config)
+
+    def compile_and_fit(self, patience=10, epochs=50,
+                        loss="mse", optimizer="adam", verbose=1):
+        model = self.model
+        def wmape(y_true, y_pred):
+            total_abs_diff = tf.reduce_sum(tf.abs(tf.subtract(y_true, y_pred)))
+            total = tf.reduce_sum(y_true)
+            wmape = tf.realdiv(total_abs_diff, total)
+            return wmape
+
+        early_stopping = tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=patience,
+            mode='min',
+            verbose=verbose,
+            restore_best_weights=True)
+
+        model_checkpoint = tf.keras.callbacks.ModelCheckpoint(
+            filepath=f'{FOLDER_PATH}/artifacts/checkpoint',
+            save_weights_only=True, monitor='val_wmape',
+            mode='min',
+            verbose=verbose,
+            save_best_only=True)
+
+        if wandb.run is not None:
+            wandb_callback = wandb.keras.WandbCallback(
+                log_weights=True, # log_gradients=True, # training_data=window.train,
+                # validation_data=window.valid, # log_evaluation=True,
+            )
+            callbacks=[early_stopping, model_checkpoint, wandb_callback]
+        else:
+            callbacks=[early_stopping, model_checkpoint]
+
+        if gpu:
+            model.compile(loss=loss, optimizer=optimizer, metrics=[wmape],
+                               steps_per_execution=32, jit_compile=True)
+        else:
+            model.compile(loss=loss, optimizer=optimizer, metrics=[wmape])
+
+        history = model.fit(self.window.train, epochs=epochs,
+                            validation_data=self.window.valid,
+                            verbose=verbose, callbacks=callbacks)
+        model.load_weights(f'{FOLDER_PATH}/artifacts/checkpoint')
+        self.fitted_model = model
 
 
-def compile_and_fit(model, window, patience=10, max_epochs=50,
-                    loss="mse", optimizer="adam", verbose=1):
-    def wmape(y_true, y_pred):
-        total_abs_diff = tf.reduce_sum(tf.abs(tf.subtract(y_true, y_pred)))
-        total = tf.reduce_sum(y_true)
-        wmape = tf.realdiv(total_abs_diff, total)
-        return wmape
+    def plot(self, set="valid"):
+        assert set in ["valid", "test"]
+        dataset = self.window.__getattribute__(set)
+        indices = self.window.data.__getattribute__(f"{set}_indices")
+        predictions = self.fitted_model.predict(dataset)
+        actuals = np.concatenate([y for _, y in dataset], axis=0)
+        xs = indices[-len(actuals[:, :, 0, :].flatten()):]
 
-    early_stopping = tf.keras.callbacks.EarlyStopping(
-        monitor='val_loss',
-        patience=patience,
-        mode='min',
-        verbose=verbose,
-        restore_best_weights=True)
+        fig = go.Figure()
 
-    model_checkpoint = tf.keras.callbacks.ModelCheckpoint(
-        filepath=f'{FOLDER_PATH}/artifacts/checkpoint',
-        save_weights_only=True, monitor='val_wmape',
-        mode='min',
-        verbose=verbose,
-        save_best_only=True)
+        for i, plant in enumerate(self.window.data.plants):
+            fig.add_trace(go.Scatter(**{"x": xs, "y": actuals[:, :, i, :].flatten(), "name": f"{plant}_actual", "line": {"color": "royalblue"}}))
+            fig.add_trace(go.Scatter(**{"x": xs, "y": predictions[:, :, i, :].flatten(), "name": f"{plant}_prediction", "line": {"color": "firebrick"}}))
 
-    # metrics = ["mse", wmape]
-    if gpu:
-        model.compile(loss=loss, optimizer=optimizer, metrics=[wmape],
-                    steps_per_execution=32, jit_compile=True)
-    else:
-        model.compile(loss=loss, optimizer=optimizer, metrics=[wmape])
-    history = model.fit(window.train, epochs=max_epochs,
-                        validation_data=window.valid,
-                        verbose=verbose,
-                        callbacks=[early_stopping, model_checkpoint])
-    model.load_weights(f'{FOLDER_PATH}/artifacts/checkpoint')
-    return model, history
+        fig.update_layout(
+            title='Predictions vs. Actuals',
+            xaxis_title='Date',
+            yaxis_title='Production (MinMaxScaled)')
 
-def correlation_ordering(df, plants, initial_start=7):
-    corr = pd.pivot_table(
-        df[["rt_plant_id", "production"]].reset_index(),
-        index="forecast_dt", columns="rt_plant_id",
-        values="production").corr()
-    selected_plant_ids, selected_plants = [], []
-    to_append = initial_start
-    selected_plant_ids.append(plants[to_append])
-    selected_plants.append(to_append)
+        if wandb.run is not None:
+            wandb.log({f"{set}_predictions": fig})
+        else:
+            fig.show()
 
-    for _ in range(len(plants)-1):
-        corr_series = corr.iloc[to_append].drop(labels=selected_plant_ids)
-        to_append = plants.index(corr_series.idxmax())
-        selected_plant_ids.append(plants[to_append])
-        selected_plants.append(to_append)
-    return selected_plants
+    def _calculate_wmape(self, pred, actual):
+        return np.sum(np.abs(actual - pred)) / np.sum(actual)
 
-# corr_mean = 0.
-# out = []
+    def calculate_accuracy(self, set):
+        assert set in ["train", "valid", "test"]
+        dataset = self.window.__getattribute__(set)
+        indices = self.window.data.__getattribute__(f"{set}_indices")
+        predictions = self.fitted_model.predict(dataset)
+        actuals = np.concatenate([y for _, y in dataset], axis=0)
 
-# for i in range(94):
-#     corr_list = []
-#     selected_plants = []
-#     selected_plant_ids = []
-#     to_append = i
-#     selected_plant_ids.append(PLANTS[to_append])
-#     selected_plants.append(to_append)
+        wmape_month_df = pd.DataFrame()
+        wmape_df = pd.DataFrame()
 
-#     for _ in range(93):
-#         corr_series = corr.iloc[to_append].drop(labels=selected_plant_ids)
-#         to_append = PLANTS.index(corr_series.idxmax())
-#         selected_plant_ids.append(PLANTS[to_append])
-#         selected_plants.append(to_append)
-#         corr_list.append(np.max(corr_series))
+        for i, plant in enumerate(self.window.data.plants):
+            actual_ = actuals[:, :, i].reshape(-1)
+            pred_ = predictions[:, :, i].reshape(-1)
 
-#     corr_mean = np.mean(corr_list)
-#     out.append([
-#         i, corr_mean, np.min(corr_list), np.sum([i > 0.9 for i in corr_list]),
-#         np.sum([i > 0.8 for i in corr_list]), np.sum([i > 0.7 for i in corr_list]),
-#         np.sum([i > 0.6 for i in corr_list]), np.sum([i > 0.5 for i in corr_list])])
+            temp_df = pd.DataFrame({
+                "rt_plant_id": plant,
+                "month": pd.to_datetime(indices[-len(actual_):]).strftime("%Y%m"),
+                "actual": actual_,
+                "pred": pred_,
+            })
+            wmape_month_ = temp_df.groupby(["month", "rt_plant_id"], as_index=False).apply(
+                lambda x: pd.Series({"wmape": self._calculate_wmape(x["pred"], x["actual"])}))
+            wmape_ = temp_df.groupby(["rt_plant_id"], as_index=False).apply(
+                lambda x: pd.Series({"wmape": self._calculate_wmape(x["pred"], x["actual"])}))
 
-# out = pd.DataFrame(out)
-# out.columns = ["plant", "mean", "min", "above_9", "above_8", "above_7", "above_6", "above_5"]
-# out.sort_values("min", ascending=False).head(20)
+            wmape_month_df = wmape_month_df.append(wmape_month_)
+            wmape_df = wmape_df.append(wmape_)
 
-# selected_plants = correlation_ordering(df)
+        self.wmape_month_df = wmape_month_df
+        self.wmape_df = wmape_df
 
-# def expand_plant_dimension(df, selected_plants=None):
-#     n_loc = len(PLANTS)
-#     n_time = df.index.nunique()
-#     cols = [col for col in df.columns if col != "rt_plant_id"]
-#     n_cols = len(cols)
+    def plot_accuracy(self, set):
+        self.calculate_accuracy(set)
 
-#     df_np = np.zeros((n_time, n_loc, n_cols))
-#     if selected_plants is not None:
-#         for i, j in enumerate(selected_plants):
-#             df_np[:, i, :] = df[df.rt_plant_id == PLANTS[j]][cols].values
-#     else:
-#         for i, plant_id in enumerate(PLANTS):
-#             df_np[:, i, :] = df[df.rt_plant_id == plant_id][cols].values
-#     return df_np
+        colors = px.colors.qualitative.Plotly
+        xs = sorted(self.wmape_month_df.month.unique())
 
-# train_df_np = expand_plant_dimension(train_df, selected_plants)
-# valid_df_np = expand_plant_dimension(valid_df, selected_plants)
-# test_df_np = expand_plant_dimension(test_df, selected_plants)
+        fig1 = go.Figure()
+        for i, plant in enumerate(self.window.data.plants):
+            fig1.add_trace(go.Scatter(**{
+                "x": xs,
+                "y": self.wmape_month_df[self.wmape_month_df["rt_plant_id"] == plant].wmape,
+                "name": f"{plant}_wmape", "line": {"color": colors[i%len(colors)]}}))
+        fig1.update_layout(xaxis_title='Month', yaxis_title='WMAPE', title="Plantwise WMAPE for months")
+        # fig1.update_yaxes(range=[0.1, 0.9])
 
-def _calculate_wmape(pred, actual):
-    return np.sum(np.abs(actual - pred)) / np.sum(actual)
+        fig2 = go.Figure()
+        for month_ in xs:
+            fig2.add_trace(go.Box(
+                y=self.wmape_month_df[self.wmape_month_df["month"] == month_].wmape,
+                name=month_))
+        fig2.update_layout(xaxis_title='Month', yaxis_title='WMAPE', title="Total WMAPE for months")
+        # fig2.update_yaxes(range=[0.1, 0.9])
+
+        fig3 = go.Figure()
+        fig3.add_trace(go.Box(y=self.wmape_df.wmape, name=f"{set}_wmape"))
+        fig3.update_layout(yaxis_title='WMAPE', title="WMAPE")
+        # fig3.update_yaxes(range=[0.1, 0.9])
+
+        if wandb.run is not None:
+            wandb.log({"scatter": fig1, "month_box": fig2, "box": fig3})
+        else:
+            fig1.show(); fig2.show(); fig3.show();
+
+
+
 
 def calculate_plantwise_wmape(model, window, selected_plants):
     predictions = model.predict(window.test)
@@ -290,7 +354,10 @@ def calculate_plantwise_wmape(model, window, selected_plants):
     wmape_df.columns = ["rt_plant_id", "wmape"]
     wmape_val_df.columns = ["rt_plant_id", "wmape_val"]
     wmape_df = pd.merge(wmape_df, wmape_val_df, on="rt_plant_id")
-    return wmape_df.sort_values("wmape")
+    wmape_df = wmape_df.sort_values("wmape")
+    if wandb.run is not None:
+        wandb.log({"wmape_table": wandb.Table(dataframe=wmape_df)})
+    return wmape_df
 
 def plot_plantwise_predictions(model, dataset, plant_id=None):
     predictions = model.predict(dataset)

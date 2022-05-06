@@ -1,4 +1,3 @@
-from cgi import test
 import pandas as pd
 import numpy as np
 import os
@@ -8,104 +7,156 @@ if not os.environ.get("FOLDER_PATH"):
 else:
     FOLDER_PATH = os.environ["FOLDER_PATH"]
 
-def read_data(generate_speed_angle=False,
-              add_lagged=False,
-              number_of_plants=94):
-    try:
-        df = pd.read_parquet(f"{FOLDER_PATH}/data/processed/outlier_removed.parquet")
-    except:
-        df = pd.read_parquet("https://storage.googleapis.com/wind_power_forecast/data/processed/outlier_removed.parquet")
-    if add_lagged:
-        df["production_48_lagged"] = df.groupby("rt_plant_id").production.shift(48)
-        df = df.dropna()
-    weather_cols = [col for col in df.columns if col.startswith(("UGRD", "VGRD"))]
+class DataReader:
+    def __init__(self, number_of_plants) -> None:
+        self.number_of_plants = number_of_plants
+        self.raw_df = None
+        self.df = None
 
-    assert 1 <= number_of_plants <= 94
-    plants = sorted(df.groupby("rt_plant_id").production.sum().sort_values(ascending=False).index[:number_of_plants].to_list())
-    df = df[df["rt_plant_id"].isin(plants)]
+        self.id_cols = ["rt_plant_id", "production"]
+        self.weather_cols = None
 
-    if add_lagged:
-        cols = ["rt_plant_id", "production", "production_48_lagged", *weather_cols]
-    else:
-        cols = ["rt_plant_id", "production", *weather_cols]
+        self.train_df = None
+        self.valid_df = None
+        self.test_df = None
 
-    df = df.set_index("forecast_dt")[cols]
+        self.train_indices = None
+        self.valid_indices = None
+        self.test_indices = None
 
-    if generate_speed_angle:
-        for box in ["SW", "NW", "NE", "SE"]:
-            df[f"speed_{box}"] = np.sqrt(np.square(df[f"UGRD_80.m.above.ground.{box}"]) + np.square(df[f"VGRD_80.m.above.ground.{box}"]))
-            df[f"angle_{box}"] = np.arctan(df[f"UGRD_80.m.above.ground.{box}"] / df[f"VGRD_80.m.above.ground.{box}"])
-    return df, plants
+        # main function after initialization
+        # self.process()
 
-def _expand_plant_dimension(df):
-    PLANTS = sorted(df.rt_plant_id.unique())
-    n_loc = len(PLANTS)
-    n_time = df.index.nunique()
-    cols = [col for col in df.columns if col != "rt_plant_id"]
-    n_cols = len(cols)
+    @property
+    def plants(self):
+        return sorted(self.raw_df.groupby("rt_plant_id").production.sum().sort_values(ascending=False).index[:self.number_of_plants].to_list())
 
-    df_np = np.zeros((n_time, n_loc, n_cols))
-    for i, plant_id in enumerate(PLANTS):
-        df_np[:, i, :] = df[df.rt_plant_id == plant_id][cols].values
-    return df_np
+    @property
+    def time_indices(self):
+        return sorted(self.df.index.unique())
 
-def scale_data(train_df, valid_df, test_df, plants, scaler="minmax"):
-    import pickle
-    assert scaler in ["minmax", "standart"]
+    def process(self, add_speed=True, add_lagged=True,
+                train_ratio=0.8, valid_ratio=0.1, test_ratio=None,
+                expand=True, scaler="minmax"):
+        self.read(add_speed, add_lagged)
+        self.split(train_ratio, valid_ratio, test_ratio)
+        self.expand(expand)
+        self.scale(scaler)
 
-    scalers = {}
-    lower_bound = 1e-8
+    def read(self, add_speed, add_lagged):
+        self._read_parquet()
+        self._add_lagged(add_lagged)
+        self.df = self.df.set_index("forecast_dt")[[*self.id_cols, *self.weather_cols]]
+        self._add_speed(add_speed)
 
-    if scaler == "minmax":
-        from sklearn.preprocessing import MinMaxScaler as scaler_
-    else:
-        from sklearn.preprocessing import StandartScaler as scaler_
+    def split(self, train_ratio, valid_ratio, test_ratio, verbose=1):
+        time_indices = self.time_indices
+        if test_ratio is None:
+             test_ratio = 1 - train_ratio - valid_ratio
+        self.train_indices = time_indices[:int(len(time_indices) * train_ratio)]
+        self.valid_indices = time_indices[int(len(time_indices) * train_ratio):int(len(time_indices) * (train_ratio + valid_ratio))]
+        self.test_indices = time_indices[int(len(time_indices) * (train_ratio + valid_ratio)): int(len(time_indices) * (train_ratio + valid_ratio + test_ratio))]
+        if verbose:
+            print("Train start and end dates:\t", self.train_indices[0], "\t", self.train_indices[-1])
+            try:
+                print("Validation start and end dates:\t", self.valid_indices[0], "\t", self.valid_indices[-1])
+            except:
+                pass
+            print("Test start and end dates:\t", self.test_indices[0], "\t", self.test_indices[-1])
 
-    for i, plant in enumerate(plants):
-        scalers[plant] = scaler_()
-        if isinstance(train_df, pd.DataFrame):
-            train_df.loc[train_df["rt_plant_id"] == plant, train_df.columns != "rt_plant_id"] = scalers[plant].fit_transform(
-                train_df.loc[train_df["rt_plant_id"] == plant, train_df.columns != "rt_plant_id"]).clip(min=lower_bound, max=1-lower_bound)
-            valid_df.loc[valid_df["rt_plant_id"] == plant, valid_df.columns != "rt_plant_id"] = scalers[plant].transform(
-                valid_df.loc[valid_df["rt_plant_id"] == plant, valid_df.columns != "rt_plant_id"]).clip(min=lower_bound, max=1-lower_bound)
-            test_df.loc[test_df["rt_plant_id"] == plant, test_df.columns != "rt_plant_id"] = scalers[plant].transform(
-                test_df.loc[test_df["rt_plant_id"] == plant, test_df.columns != "rt_plant_id"]).clip(min=lower_bound, max=1-lower_bound)
+        self.train_df = self.df.loc[self.train_indices, :]
+        self.valid_df = self.df.loc[self.valid_indices, :]
+        self.test_df = self.df.loc[self.test_indices, :]
+
+    def expand(self, expand):
+        if expand:
+            self.train_df = self._expand_plant_dimension(self.train_df)
+            self.valid_df = self._expand_plant_dimension(self.valid_df)
+            self.test_df = self._expand_plant_dimension(self.test_df)
+
+    def scale(self, scaler):
+        if scaler is None:
+            return
+        import pickle
+        assert scaler in ["minmax", "standart"]
+
+        scalers = {}
+        lower_bound = 1e-8
+
+        if scaler == "minmax":
+            from sklearn.preprocessing import MinMaxScaler as scaler_
         else:
-            train_df[:, i, :] = scalers[plant].fit_transform(train_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
-            valid_df[:, i, :] = scalers[plant].transform(valid_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
-            test_df[:, i, :] = scalers[plant].transform(test_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
+            from sklearn.preprocessing import StandartScaler as scaler_
 
-    with open(f'{FOLDER_PATH}/artifacts/scalers.pickle', 'wb') as handle:
-        pickle.dump(scalers, handle)
+        for i, plant in enumerate(self.plants):
+            scalers[plant] = scaler_()
+            if isinstance(self.train_df, pd.DataFrame):
+                cols = [col for col in self.train_df.columns if col != "rt_plant_id"]
+                self.train_df.loc[self.train_df["rt_plant_id"] == plant, cols] = scalers[plant].fit_transform(
+                    self.train_df.loc[self.train_df["rt_plant_id"] == plant, cols]).clip(min=lower_bound, max=1-lower_bound)
+                self.valid_df.loc[self.valid_df["rt_plant_id"] == plant, cols] = scalers[plant].transform(
+                    self.valid_df.loc[self.valid_df["rt_plant_id"] == plant, cols]).clip(min=lower_bound, max=1-lower_bound)
+                self.test_df.loc[self.test_df["rt_plant_id"] == plant, cols] = scalers[plant].transform(
+                    self.test_df.loc[self.test_df["rt_plant_id"] == plant, cols]).clip(min=lower_bound, max=1-lower_bound)
+            else:
+                self.train_df[:, i, :] = scalers[plant].fit_transform(self.train_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
+                self.valid_df[:, i, :] = scalers[plant].transform(self.valid_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
+                self.test_df[:, i, :] = scalers[plant].transform(self.test_df[:, i, :]).clip(min=lower_bound, max=1-lower_bound)
 
-    return train_df, valid_df, test_df
+        with open(f'{FOLDER_PATH}/artifacts/scalers.pickle', 'wb') as handle:
+            pickle.dump(scalers, handle)
 
-def expand_data(train_df, valid_df, test_df):
-    train_df = _expand_plant_dimension(train_df)
-    valid_df = _expand_plant_dimension(valid_df)
-    test_df = _expand_plant_dimension(test_df)
-    return train_df, valid_df, test_df
+    def correlation_ordering(df, plants, initial_start=7):
+        corr = pd.pivot_table(
+            df[["rt_plant_id", "production"]].reset_index(),
+            index="forecast_dt", columns="rt_plant_id",
+            values="production").corr()
+        ordered_plant_ids, ordered_plants = [], []
+        to_append = initial_start
+        ordered_plant_ids.append(plants[to_append])
+        ordered_plants.append(to_append)
+
+        for _ in range(len(plants)-1):
+            corr_series = corr.iloc[to_append].drop(labels=ordered_plant_ids)
+            to_append = plants.index(corr_series.idxmax())
+            ordered_plant_ids.append(plants[to_append])
+            ordered_plants.append(to_append)
+        return ordered_plants
 
 
-def split_data(df, train_ratio=0.8, valid_ratio=0.1):
-    time_indices = sorted(df.index.unique())
+    def _expand_plant_dimension(self, df):
+        n_loc = len(self.plants)
+        n_time = df.index.nunique()
+        cols = [col for col in self.df.columns if col != "rt_plant_id"]
+        n_cols = len(cols)
 
-    train_indices = time_indices[:int(len(time_indices) * train_ratio)]
-    valid_indices = time_indices[int(len(time_indices) * train_ratio):int(len(time_indices) * (train_ratio + valid_ratio))]
-    test_indices = time_indices[int(len(time_indices) * (train_ratio + valid_ratio)):]
+        df_np = np.zeros((n_time, n_loc, n_cols))
+        for i, plant_id in enumerate(self.plants):
+            df_np[:, i, :] = df[df.rt_plant_id == plant_id][cols].values
+        return df_np
 
-    print("Train start and end dates:\t", train_indices[0], "\t", train_indices[-1])
-    try:
-        print("Validation start and end dates:\t", valid_indices[0], "\t", valid_indices[-1])
-    except:
-        pass
-    print("Test start and end dates:\t", test_indices[0], "\t", test_indices[-1])
+    def _read_parquet(self):
+        try:
+            df = pd.read_parquet(f"{FOLDER_PATH}/data/processed/outlier_removed.parquet")
+        except:
+            df = pd.read_parquet("https://storage.googleapis.com/wind_power_forecast/data/processed/outlier_removed.parquet")
+        self.raw_df = df
+        self.weather_cols = [col for col in df.columns if col.startswith(("UGRD", "VGRD"))]
+        self.df = df[df["rt_plant_id"].isin(self.plants)]
 
-    train_df = df.loc[train_indices, :]
-    valid_df = df.loc[valid_indices, :]
-    test_df = df.loc[test_indices, :]
+    def _add_lagged(self, add_lagged):
+        if add_lagged:
+            self.df["production_48_lagged"] = self.df.groupby("rt_plant_id").production.shift(48)
+            self.df = self.df.dropna()
+            self.id_cols.append("production_48_lagged")
 
-    return train_df, valid_df, test_df
+    def _add_speed(self, add_speed):
+        if add_speed:
+            df = self.df
+            for box in ["SW", "NW", "NE", "SE"]:
+                df[f"speed_{box}"] = np.sqrt(np.square(df[f"UGRD_80.m.above.ground.{box}"]) + np.square(df[f"VGRD_80.m.above.ground.{box}"]))
+                df[f"angle_{box}"] = np.arctan(df[f"UGRD_80.m.above.ground.{box}"] / df[f"VGRD_80.m.above.ground.{box}"])
+            self.df = df
 
 def plot_metrics(performance, val_performance, metric_index=-1):
     import matplotlib.pyplot as plt
