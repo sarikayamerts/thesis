@@ -77,6 +77,7 @@ class GluonTSWrapper:
     def dataset_helper(self, df_, plant_id, is_train=True):
         df__ = df_[df_["rt_plant_id"] == plant_id]
         if not is_train:
+            # it's enough to look for only context + prediction length period
             df__ = df__.iloc[-(self.context_length+self.prediction_length):]
         return {
             "target": df__.production,
