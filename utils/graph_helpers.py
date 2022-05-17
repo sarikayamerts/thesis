@@ -84,7 +84,7 @@ class GraphConv(layers.Layer):
         neighbour_representations = tf.gather(features, self.graph_info.edges[1])
         # print(neighbour_representations.shape)
         neighbour_representations = tf.transpose(neighbour_representations, [3, 1, 2, 0])
-        neighbour_representations *= tf.convert_to_tensor(np.array(self.graph_info.edge_weights)    .astype("float32"))
+        neighbour_representations *= tf.convert_to_tensor(np.array(self.graph_info.edge_weights).astype("float32"))
         neighbour_representations = tf.transpose(neighbour_representations, [3, 1, 2, 0])
         aggregated_messages = self.aggregate(neighbour_representations)
         # print("Computing aggregated messages")

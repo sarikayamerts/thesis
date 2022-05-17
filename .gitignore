@@ -18,3 +18,5 @@ notebooks/multi_plant/wandb/*
 # vscode
 .vscode/*
 
+*.json
+*.png

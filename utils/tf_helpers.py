@@ -167,6 +167,8 @@ class BaseTFModel:
         self.OUT_STEPS = 24
         self.history = None
         self.fitted_model = None
+        self.valid_predictions = None
+        self.test_predictions = None
 
     @property
     def model(self):
@@ -218,7 +220,7 @@ class BaseTFModel:
 
         if wandb.run is not None:
             wandb_callback = wandb.keras.WandbCallback(
-                log_weights=True, # log_gradients=True, # training_data=window.train,
+                log_weights=False, # log_gradients=True, # training_data=window.train,
                 # validation_data=window.valid, # log_evaluation=True,
             )
             callbacks=[early_stopping, model_checkpoint, wandb_callback]
@@ -237,20 +239,45 @@ class BaseTFModel:
         model.load_weights(f'{FOLDER_PATH}/artifacts/checkpoint')
         self.fitted_model = model
 
+    def predict(self):
+        self.valid_predictions = self.make_prediction("valid")
+        self.test_predictions = self.make_prediction("test")
 
-    def plot(self, set="valid"):
-        assert set in ["valid", "test"]
+        if wandb.run is not None:
+            wandb.log({
+                "valid_predictions": wandb.Table(dataframe=self.valid_predictions),
+                "test_predictions": wandb.Table(dataframe=self.test_predictions),
+            })
+
+    def make_prediction(self, set="valid"):
         dataset = self.window.__getattribute__(set)
         indices = self.window.data.__getattribute__(f"{set}_indices")
         predictions = self.fitted_model.predict(dataset)
         actuals = np.concatenate([y for _, y in dataset], axis=0)
         xs = indices[-len(actuals[:, :, 0, :].flatten()):]
 
-        fig = go.Figure()
+        prediction_output = pd.DataFrame()
 
         for i, plant in enumerate(self.window.data.plants):
-            fig.add_trace(go.Scatter(**{"x": xs, "y": actuals[:, :, i, :].flatten(), "name": f"{plant}_actual", "line": {"color": "royalblue"}}))
-            fig.add_trace(go.Scatter(**{"x": xs, "y": predictions[:, :, i, :].flatten(), "name": f"{plant}_prediction", "line": {"color": "firebrick"}}))
+            pred_ = pd.DataFrame({
+                "actuals": np.round(actuals[:, :, i, :].flatten(), 6),
+                "predictions": np.round(predictions[:, :, i, :].flatten(), 6),
+                "forecast_dt": xs, "rt_plant_id": plant
+            })
+            prediction_output = prediction_output.append(pred_)
+        return prediction_output
+
+    def plot(self, set="valid"):
+        preds = self.__getattribute__(f"{set}_predictions")
+        if preds is None:
+            self.predict()
+
+        fig = go.Figure()
+
+        for plant in self.window.data.plants:
+            df_ = self.test_predictions[self.test_predictions["rt_plant_id"] == plant]
+            fig.add_trace(go.Scatter(**{"x": df_.forecast_dt, "y": df_.actuals, "name": f"{plant}_actual", "line": {"color": "royalblue"}}))
+            fig.add_trace(go.Scatter(**{"x": df_.forecast_dt, "y": df_.predictions, "name": f"{plant}_prediction", "line": {"color": "firebrick"}}))
 
         fig.update_layout(
             title='Predictions vs. Actuals',
@@ -258,55 +285,36 @@ class BaseTFModel:
             yaxis_title='Production (MinMaxScaled)')
 
         if wandb.run is not None:
-            wandb.log({f"{set}_predictions": fig})
+            wandb.log({f"{set}_prediction_plot": fig})
         else:
             fig.show()
 
     def _calculate_wmape(self, pred, actual):
         return np.sum(np.abs(actual - pred)) / np.sum(actual)
 
-    def calculate_accuracy(self, set):
-        assert set in ["train", "valid", "test"]
-        dataset = self.window.__getattribute__(set)
-        indices = self.window.data.__getattribute__(f"{set}_indices")
-        predictions = self.fitted_model.predict(dataset)
-        actuals = np.concatenate([y for _, y in dataset], axis=0)
+    def calculate_accuracy(self, set="valid"):
+        preds = self.__getattribute__(f"{set}_predictions")
+        preds["month"] = pd.to_datetime(preds["forecast_dt"]).dt.strftime("%Y%m")
 
-        wmape_month_df = pd.DataFrame()
-        wmape_df = pd.DataFrame()
+        wmape_month_df = preds.groupby(["month", "rt_plant_id"], as_index=False).apply(
+            lambda x: pd.Series({"wmape": self._calculate_wmape(x["predictions"], x["actuals"])}))
 
-        for i, plant in enumerate(self.window.data.plants):
-            actual_ = actuals[:, :, i].reshape(-1)
-            pred_ = predictions[:, :, i].reshape(-1)
+        wmape_df = preds.groupby(["rt_plant_id"], as_index=False).apply(
+            lambda x: pd.Series({"wmape": self._calculate_wmape(x["predictions"], x["actuals"])}))
+        return wmape_month_df, wmape_df
 
-            temp_df = pd.DataFrame({
-                "rt_plant_id": plant,
-                "month": pd.to_datetime(indices[-len(actual_):]).strftime("%Y%m"),
-                "actual": actual_,
-                "pred": pred_,
-            })
-            wmape_month_ = temp_df.groupby(["month", "rt_plant_id"], as_index=False).apply(
-                lambda x: pd.Series({"wmape": self._calculate_wmape(x["pred"], x["actual"])}))
-            wmape_ = temp_df.groupby(["rt_plant_id"], as_index=False).apply(
-                lambda x: pd.Series({"wmape": self._calculate_wmape(x["pred"], x["actual"])}))
-
-            wmape_month_df = wmape_month_df.append(wmape_month_)
-            wmape_df = wmape_df.append(wmape_)
-
-        self.wmape_month_df = wmape_month_df
-        self.wmape_df = wmape_df
-
-    def plot_accuracy(self, set):
-        self.calculate_accuracy(set)
+    def plot_accuracy(self, set=None, wmape_month_df=None, wmape_df=None):
+        if (wmape_month_df is None) or (wmape_df is None):
+            wmape_month_df, wmape_df = self.calculate_accuracy(set)
 
         colors = px.colors.qualitative.Plotly
-        xs = sorted(self.wmape_month_df.month.unique())
+        xs = sorted(wmape_month_df.month.unique())
 
         fig1 = go.Figure()
         for i, plant in enumerate(self.window.data.plants):
             fig1.add_trace(go.Scatter(**{
                 "x": xs,
-                "y": self.wmape_month_df[self.wmape_month_df["rt_plant_id"] == plant].wmape,
+                "y": wmape_month_df[wmape_month_df["rt_plant_id"] == plant].wmape,
                 "name": f"{plant}_wmape", "line": {"color": colors[i%len(colors)]}}))
         fig1.update_layout(xaxis_title='Month', yaxis_title='WMAPE', title="Plantwise WMAPE for months")
         # fig1.update_yaxes(range=[0.1, 0.9])
@@ -314,17 +322,19 @@ class BaseTFModel:
         fig2 = go.Figure()
         for month_ in xs:
             fig2.add_trace(go.Box(
-                y=self.wmape_month_df[self.wmape_month_df["month"] == month_].wmape,
+                y=wmape_month_df[wmape_month_df["month"] == month_].wmape,
                 name=month_))
         fig2.update_layout(xaxis_title='Month', yaxis_title='WMAPE', title="Total WMAPE for months")
         # fig2.update_yaxes(range=[0.1, 0.9])
 
         fig3 = go.Figure()
-        fig3.add_trace(go.Box(y=self.wmape_df.wmape, name=f"{set}_wmape"))
+        fig3.add_trace(go.Box(y=wmape_df.wmape, name=f"{set}_wmape"))
         fig3.update_layout(yaxis_title='WMAPE', title="WMAPE")
         # fig3.update_yaxes(range=[0.1, 0.9])
 
         if wandb.run is not None:
+            wandb.log({f"{set}_wmape_table": wandb.Table(dataframe=wmape_df),
+                       f"{set}_wmape_month_table": wandb.Table(dataframe=wmape_month_df)})
             wandb.log({"scatter": fig1, "month_box": fig2, "box": fig3})
         else:
             fig1.show(); fig2.show(); fig3.show();

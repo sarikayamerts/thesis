@@ -173,3 +173,17 @@ def plot_metrics(performance, val_performance, metric_index=-1):
 
 def calculate_wmape(preds, actuals):
     return np.sum(np.abs(preds-actuals)) / np.sum(np.abs(actuals))
+
+def download_artifact(artifact):
+    import wandb, os, json
+    # 'merts/keras/run-3xa1vds1-valid_predictions:v0'
+    artifact = wandb.use_artifact(artifact, type='run_table')
+    artifact_dir = artifact.download()
+
+    for file in os.listdir(artifact_dir):
+        if file.endswith(".json"):
+            with open(os.path.join(artifact_dir, file)) as json_data:
+                data = json.load(json_data)
+    df = pd.DataFrame(data["data"], columns=data["columns"])
+    df["forecast_dt"] = pd.to_datetime(df["forecast_dt"])
+    return df
