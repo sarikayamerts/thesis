@@ -24,6 +24,8 @@ class DataReader:
         self.valid_indices = None
         self.test_indices = None
 
+        self.corr_ordered_plants = None
+
         # main function after initialization
         # self.process()
 
@@ -37,10 +39,10 @@ class DataReader:
 
     def process(self, add_speed=True, add_lagged=True,
                 train_ratio=0.8, valid_ratio=0.1, test_ratio=None,
-                expand=True, scaler="minmax"):
+                expand=True, scaler="minmax", corr_order=False):
         self.read(add_speed, add_lagged)
         self.split(train_ratio, valid_ratio, test_ratio)
-        self.expand(expand)
+        self.expand(expand, corr_order=corr_order)
         self.scale(scaler)
 
     def read(self, add_speed, add_lagged):
@@ -68,11 +70,14 @@ class DataReader:
         self.valid_df = self.df.loc[self.valid_indices, :]
         self.test_df = self.df.loc[self.test_indices, :]
 
-    def expand(self, expand):
+    def expand(self, expand, corr_order=None, initial_start=7):
         if expand:
             self.train_df = self._expand_plant_dimension(self.train_df)
             self.valid_df = self._expand_plant_dimension(self.valid_df)
             self.test_df = self._expand_plant_dimension(self.test_df)
+        if corr_order:
+            self.correlation_ordering(initial_start=initial_start)
+
 
     def scale(self, scaler):
         if scaler is None:
@@ -106,9 +111,10 @@ class DataReader:
         with open(f'{FOLDER_PATH}/artifacts/scalers.pickle', 'wb') as handle:
             pickle.dump(scalers, handle)
 
-    def correlation_ordering(df, plants, initial_start=7):
+    def correlation_ordering(self, initial_start=7):
+        plants = self.plants.copy()
         corr = pd.pivot_table(
-            df[["rt_plant_id", "production"]].reset_index(),
+            self.raw_df[["rt_plant_id", "production", "forecast_dt"]],
             index="forecast_dt", columns="rt_plant_id",
             values="production").corr()
         ordered_plant_ids, ordered_plants = [], []
@@ -121,8 +127,12 @@ class DataReader:
             to_append = plants.index(corr_series.idxmax())
             ordered_plant_ids.append(plants[to_append])
             ordered_plants.append(to_append)
-        return ordered_plants
 
+        self.corr_ordered_plants = [plants[i] for i in ordered_plants]
+
+        self.train_df = self.train_df[:, ordered_plants, :]
+        self.valid_df = self.valid_df[:, ordered_plants, :]
+        self.test_df = self.test_df[:, ordered_plants, :]
 
     def _expand_plant_dimension(self, df):
         n_loc = len(self.plants)
