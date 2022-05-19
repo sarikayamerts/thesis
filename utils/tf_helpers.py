@@ -179,7 +179,7 @@ class BaseTFModel:
         model = self.add_model(model)
 
         model.add(tf.keras.layers.Reshape([self.window.number_of_plants, -1], name="end--------"))
-        model.add(tf.keras.layers.Dense(self.OUT_STEPS, activation=final_activation))
+        model.add(tf.keras.layers.Dense(self.OUT_STEPS, activation=final_activation, kernel_initializer=tf.keras.initializers.glorot_uniform(seed=1994)))
         model.add(tf.keras.layers.Permute((2,1)))
         model.add(tf.keras.layers.Reshape([self.OUT_STEPS, self.window.number_of_plants, 1]))
         return model
