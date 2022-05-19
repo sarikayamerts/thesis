@@ -196,7 +196,7 @@ class BaseTFModel:
         wandb.init(project=project, name=name, config=config)
 
     def compile_and_fit(self, patience=10, epochs=50,
-                        loss="mse", optimizer="adam", verbose=1):
+                        loss="mse", optimizer="adam", verbose=1, trial=None):
         model = self.model
         def wmape(y_true, y_pred):
             total_abs_diff = tf.reduce_sum(tf.abs(tf.subtract(y_true, y_pred)))
@@ -218,14 +218,19 @@ class BaseTFModel:
             verbose=verbose,
             save_best_only=True)
 
+        callbacks = [early_stopping, model_checkpoint]
+
+        if trial is not None:
+            from optuna.integration import TFKerasPruningCallback
+            pruning = TFKerasPruningCallback(trial, "val_wmape")
+            callbacks.append(pruning)
+
         if wandb.run is not None:
             wandb_callback = wandb.keras.WandbCallback(
                 log_weights=False, # log_gradients=True, # training_data=window.train,
                 # validation_data=window.valid, # log_evaluation=True,
             )
-            callbacks=[early_stopping, model_checkpoint, wandb_callback]
-        else:
-            callbacks=[early_stopping, model_checkpoint]
+            callbacks.append(wandb_callback)
 
         if gpu:
             model.compile(loss=loss, optimizer=optimizer, metrics=[wmape],
