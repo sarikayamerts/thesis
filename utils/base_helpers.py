@@ -8,7 +8,8 @@ else:
     FOLDER_PATH = os.environ["FOLDER_PATH"]
 
 class DataReader:
-    def __init__(self, number_of_plants) -> None:
+    def __init__(self, number_of_plants=None, selected_plants=None) -> None:
+        self.selected_plants = selected_plants
         self.number_of_plants = number_of_plants
         self.raw_df = None
         self.df = None
@@ -149,7 +150,10 @@ class DataReader:
             df = pd.read_parquet("https://storage.googleapis.com/wind_power_forecast/data/processed/outlier_removed.parquet")
         self.raw_df = df
         self.weather_cols = [col for col in df.columns if col.startswith(("UGRD", "VGRD"))]
-        self.plants = sorted(self.raw_df.groupby("rt_plant_id").production.sum().sort_values(ascending=False).index[:self.number_of_plants].to_list())
+        if self.selected_plants is not None:
+            self.plants = self.selected_plants
+        else:
+            self.plants = sorted(self.raw_df.groupby("rt_plant_id").production.sum().sort_values(ascending=False).index[:self.number_of_plants].to_list())
         self.df = df[df["rt_plant_id"].isin(self.plants)]
 
     def _add_lagged(self, add_lagged):
