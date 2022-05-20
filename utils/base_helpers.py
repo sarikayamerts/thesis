@@ -24,14 +24,11 @@ class DataReader:
         self.valid_indices = None
         self.test_indices = None
 
-        self.corr_ordered_plants = None
+        self.plants = None
+        # self.corr_ordered_plants = None
 
         # main function after initialization
         # self.process()
-
-    @property
-    def plants(self):
-        return sorted(self.raw_df.groupby("rt_plant_id").production.sum().sort_values(ascending=False).index[:self.number_of_plants].to_list())
 
     @property
     def time_indices(self):
@@ -128,7 +125,7 @@ class DataReader:
             ordered_plant_ids.append(plants[to_append])
             ordered_plants.append(to_append)
 
-        self.corr_ordered_plants = [plants[i] for i in ordered_plants]
+        self.plants = [plants[i] for i in ordered_plants]
 
         self.train_df = self.train_df[:, ordered_plants, :]
         self.valid_df = self.valid_df[:, ordered_plants, :]
@@ -152,6 +149,7 @@ class DataReader:
             df = pd.read_parquet("https://storage.googleapis.com/wind_power_forecast/data/processed/outlier_removed.parquet")
         self.raw_df = df
         self.weather_cols = [col for col in df.columns if col.startswith(("UGRD", "VGRD"))]
+        self.plants = sorted(self.raw_df.groupby("rt_plant_id").production.sum().sort_values(ascending=False).index[:self.number_of_plants].to_list())
         self.df = df[df["rt_plant_id"].isin(self.plants)]
 
     def _add_lagged(self, add_lagged):
