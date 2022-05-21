@@ -23,7 +23,7 @@ if gpu:
         tf.keras.mixed_precision.set_global_policy("mixed_float16")
     # tf.keras.mixed_precision.set_global_policy("float32")
 # tf.keras.utils.set_random_seed(235813)
-tf.random.set_seed()
+tf.random.set_seed(235813)
 
 class WindowGenerator():
     def __init__(self, input_width, label_width, shift, data):
