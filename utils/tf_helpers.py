@@ -234,7 +234,7 @@ class BaseTFModel:
 
         if gpu:
             model.compile(loss=loss, optimizer=optimizer, metrics=[wmape],
-                               steps_per_execution=32, jit_compile=True)
+                          steps_per_execution=32) #, jit_compile=True)
         else:
             model.compile(loss=loss, optimizer=optimizer, metrics=[wmape])
 

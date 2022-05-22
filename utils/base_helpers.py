@@ -127,6 +127,7 @@ class DataReader:
             ordered_plants.append(to_append)
 
         self.plants = [plants[i] for i in ordered_plants]
+        self.selected_plants = self.plants
 
         self.train_df = self.train_df[:, ordered_plants, :]
         self.valid_df = self.valid_df[:, ordered_plants, :]
