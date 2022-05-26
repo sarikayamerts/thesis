@@ -56,35 +56,70 @@ class GluonTSWrapper:
 
     def prepare_gluon_datasets(self):
         train_data = self.gluon_df[self.gluon_df.index <= self.train_indices[-1]]
-        train_ds = ListDataset([self.dataset_helper(train_data, plant_id=plant_id)
-                                for plant_id in tqdm(self.gluon_df.rt_plant_id.unique())], freq=FREQ)
+        train_ds = ListDataset(self.dataset_helper(train_data), freq=FREQ)
 
+        # valid_data = lambda date_shift: self.gluon_df.iloc[:(train_l + date_shift) * data.number_of_plants]
         valid_data = lambda date_shift: self.gluon_df[self.gluon_df.index < self.valid_indices[date_shift]]
-        valid_ds = ListDataset([
-            self.dataset_helper(valid_data(date_shift), plant_id=plant_id, is_train=False)
-            for plant_id in tqdm(self.gluon_df.rt_plant_id.unique())
-            for date_shift in [(i+1)*24 for i in range(len(self.valid_indices) // 24 - 1)]
-        ], freq=FREQ)
+        valid_list = [
+            self.dataset_helper(valid_data(date_shift), is_train=False)
+            for date_shift in tqdm(range(24, len(self.valid_indices)-24, 24*5))
+        ]
+        valid_ds = ListDataset([item for sublist in valid_list for item in sublist], freq=FREQ)
 
         test_data = lambda date_shift: self.gluon_df[self.gluon_df.index < self.test_indices[date_shift]]
-        test_ds = ListDataset([
-            self.dataset_helper(test_data(date_shift), plant_id=plant_id, is_train=False)
-            for plant_id in tqdm(self.gluon_df.rt_plant_id.unique())
-            for date_shift in [(i+1)*24 for i in range(len(self.test_indices) // 24 - 1)]
-        ], freq=FREQ)
+        test_list = [
+            self.dataset_helper(test_data(date_shift), is_train=False)
+            for date_shift in tqdm(range(24, len(self.test_indices)-24, 24))
+        ]
+        test_ds = ListDataset([item for sublist in test_list for item in sublist], freq=FREQ)
         return train_ds, valid_ds, test_ds
 
-    def dataset_helper(self, df_, plant_id, is_train=True):
-        df__ = df_[df_["rt_plant_id"] == plant_id]
-        if not is_train:
-            # it's enough to look for only context + prediction length period
-            df__ = df__.iloc[-(self.context_length+self.prediction_length):]
-        return {
-            "target": df__.production,
-            "start": df__.index[0],
-            "item_id": str(plant_id),
-            "feat_dynamic_real": df__[self.feature_columns].T
-        }
+    # def prepare_gluon_datasets(self):
+    #     train_data = self.gluon_df[self.gluon_df.index <= self.train_indices[-1]]
+    #     train_ds = ListDataset([self.dataset_helper(train_data, plant_id=plant_id)
+    #                             for plant_id in tqdm(self.gluon_df.rt_plant_id.unique())], freq=FREQ)
+
+    #     valid_data = lambda date_shift, plant_id: self.gluon_df[(self.gluon_df.index < self.valid_indices[date_shift]) & (self.gluon_df["rt_plant_id"] == plant_id)]
+    #     valid_ds = ListDataset([
+    #         self.dataset_helper(valid_data(date_shift, plant_id), is_train=False)
+    #         for plant_id in tqdm(self.gluon_df.rt_plant_id.unique())
+    #         for date_shift in [(i+1)*24 for i in range(len(self.valid_indices) // 24 - 1)]
+    #     ], freq=FREQ)
+
+    #     test_data = lambda date_shift: self.gluon_df[self.gluon_df.index < self.test_indices[date_shift]]
+    #     test_ds = ListDataset([
+    #         self.dataset_helper(test_data(date_shift), plant_id=plant_id, is_train=False)
+    #         for plant_id in tqdm(self.gluon_df.rt_plant_id.unique())
+    #         for date_shift in [(i+1)*24 for i in range(len(self.test_indices) // 24 - 1)]
+    #     ], freq=FREQ)
+    #     return train_ds, valid_ds, test_ds
+
+    # def dataset_helper(self, df_, plant_id, is_train=True):
+    #     df__ = df_[df_["rt_plant_id"] == plant_id]
+    #     if not is_train:
+    #         # it's enough to look for only context + prediction length period
+    #         df__ = df__.iloc[-(self.context_length+self.prediction_length):]
+    #     return {
+    #         "target": df__.production,
+    #         "start": df__.index[0],
+    #         "item_id": str(plant_id),
+    #         "feat_dynamic_real": df__[self.feature_columns].T
+    #     }
+
+    def dataset_helper(self, df_, is_train=True):
+        out_list = []
+        for plant_id in df_["rt_plant_id"].unique():
+            df__ = df_[df_["rt_plant_id"] == plant_id]
+            if not is_train:
+                df__ = df__.iloc[-(self.context_length*2+self.prediction_length):]
+            out_list.append({
+                "target": df__.production,
+                "start": df__.index[0],
+                "item_id": str(plant_id),
+                "feat_dynamic_real": df__[self.feature_columns].T
+            })
+        return out_list
+
 
     def make_prediction(self, predictor, valid_ds, test_ds):
         valid_forecast_it, _ = make_evaluation_predictions(valid_ds, predictor=predictor, num_samples=100)
@@ -126,7 +161,7 @@ class GluonTSModel:
             "scaling": False
         }
         self.estimator = estimator
-        self.params = default_params | params
+        self.params = {**default_params, **params}
 
     def __call__(self):
         return self.estimator(**self.params)

@@ -198,5 +198,6 @@ def download_artifact(artifact):
             with open(os.path.join(artifact_dir, file)) as json_data:
                 data = json.load(json_data)
     df = pd.DataFrame(data["data"], columns=data["columns"])
-    df["forecast_dt"] = pd.to_datetime(df["forecast_dt"])
+    if "forecast_dt" in df.columns:
+        df["forecast_dt"] = pd.to_datetime(df["forecast_dt"])
     return df
