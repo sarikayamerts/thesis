@@ -14,9 +14,11 @@ ipython_config.py
 data/*
 artifacts/*
 notebooks/multi_plant/wandb/*
+notebooks/wandb/*
 
 # vscode
 .vscode/*
 
 *.json
 *.png
+

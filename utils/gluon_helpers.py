@@ -37,6 +37,7 @@ class GluonTSWrapper:
 
         self.gluon_df = self.reduce_mem_usage(
             pd.concat([self.train_df, self.valid_df, self.test_df]))
+        self.gluon_df.iloc[:, 1:] = self.gluon_df.iloc[:, 1:].clip(lower=1e-3, upper=1-1e-3)
 
         # train_ds, valid_ds, test_ds = self.prepare_gluon_datasets()
         # deepar_estimator = GluonTSModel(DeepAREstimator, params={"num_layers": 3})()
@@ -113,10 +114,10 @@ class GluonTSWrapper:
             if not is_train:
                 df__ = df__.iloc[-(self.context_length*2+self.prediction_length):]
             out_list.append({
-                "target": df__.production,
+                "target": df__.production.values,
                 "start": df__.index[0],
                 "item_id": str(plant_id),
-                "feat_dynamic_real": df__[self.feature_columns].T
+                "feat_dynamic_real": df__[self.feature_columns].T.values
             })
         return out_list
 
@@ -152,11 +153,11 @@ class GluonTSWrapper:
         return valid_output, test_output
 
 class GluonTSModel:
-    def __init__(self, estimator, params):
+    def __init__(self, estimator, params, prediction_length=48, context_length=72):
         default_params = {
             "freq": FREQ,
-            "prediction_length": PREDICTION_LENGTH,
-            "context_length": CONTEXT_LENGTH,
+            "prediction_length": prediction_length,
+            "context_length": context_length,
             "use_feat_dynamic_real": True,
             "scaling": False
         }
